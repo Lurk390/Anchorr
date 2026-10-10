@@ -3,7 +3,21 @@ import { jellyfinAuthHeaders } from "../api/jellyfin.js";
 import logger from "../utils/logger.js";
 
 const CACHE_DURATION_MS = 6 * 60 * 60 * 1000;
+// Short, so a series whose TMDB ID Jellyfin adds later is picked up soon.
+const MISSING_TMDB_CACHE_MS = 15 * 60 * 1000;
+const SERIES_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
+const FALLBACK_EFFECT =
+  "the notification uses Jellyfin artwork, skips request DM matching and deduplicates by Jellyfin SeriesId";
 const seriesProviderCache = new Map();
+let missingConfigWarned = false;
+
+function cacheSeriesProviderIds(seriesId, providerIds, ttlMs) {
+  const now = Date.now();
+  for (const [key, entry] of seriesProviderCache) {
+    if (entry.expiresAt <= now) seriesProviderCache.delete(key);
+  }
+  seriesProviderCache.set(seriesId, { data: providerIds, expiresAt: now + ttlMs });
+}
 
 export function isSeriesChild(itemType) {
   return itemType === "Season" || itemType === "Episode";
@@ -47,16 +61,25 @@ export async function resolveSeriesProviderIds(
     };
   }
 
+  if (typeof data.SeriesId !== "string" || !SERIES_ID_PATTERN.test(data.SeriesId)) {
+    logger.warn(
+      `Ignoring malformed SeriesId on ${data.ItemType} "${data.Name}"; ${FALLBACK_EFFECT}`
+    );
+    return null;
+  }
+
   const cached = seriesProviderCache.get(data.SeriesId);
-  const now = Date.now();
-  if (cached && now - cached.timestamp < CACHE_DURATION_MS) {
+  if (cached && cached.expiresAt > Date.now()) {
     return cached.data;
   }
 
   if (!apiKey || !baseUrl) {
-    logger.warn(
-      `Cannot resolve parent series metadata for ${data.ItemType} "${data.Name}": JELLYFIN_API_KEY or JELLYFIN_BASE_URL is missing`
-    );
+    if (!missingConfigWarned) {
+      missingConfigWarned = true;
+      logger.warn(
+        `Cannot resolve parent series metadata: JELLYFIN_API_KEY or JELLYFIN_BASE_URL is missing. For every season/episode, ${FALLBACK_EFFECT}. This warning is shown once.`
+      );
+    }
     return null;
   }
 
@@ -73,14 +96,20 @@ export async function resolveSeriesProviderIds(
       timeout: 5000,
     });
     const providerIds = response.data?.Items?.[0]?.ProviderIds || null;
-    seriesProviderCache.set(data.SeriesId, {
-      data: providerIds,
-      timestamp: now,
-    });
+    if (!providerIds?.Tmdb) {
+      logger.warn(
+        `Parent series of ${data.ItemType} "${data.Name}" (SeriesId=${data.SeriesId}) ${providerIds ? "has no TMDB ID in Jellyfin" : "was not found in Jellyfin"}; ${FALLBACK_EFFECT}`
+      );
+    }
+    cacheSeriesProviderIds(
+      data.SeriesId,
+      providerIds,
+      providerIds?.Tmdb ? CACHE_DURATION_MS : MISSING_TMDB_CACHE_MS
+    );
     return providerIds;
   } catch (error) {
     logger.warn(
-      `Could not resolve parent series metadata for ${data.ItemType} "${data.Name}" (SeriesId=${data.SeriesId}): ${error?.message || error}`
+      `Could not resolve parent series metadata for ${data.ItemType} "${data.Name}" (SeriesId=${data.SeriesId}): ${error?.message || error}; ${FALLBACK_EFFECT}`
     );
     return null;
   }

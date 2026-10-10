@@ -114,10 +114,11 @@ setInterval(() => {
 
 // Before 1.6.3 each Series/Season/Episode was stored under series:tmdb:<its own TMDB ID>.
 // Only the level tells which kind of item wrote the entry, so require an exact match.
-function hasLegacyItemEntry(data) {
-  if (!data.Provider_tmdb) return false;
-  const entry = sentNotifications.get(`series:tmdb:${data.Provider_tmdb}`);
-  return entry?.level === getItemLevel(data.ItemType);
+function findLegacyItemKey(data) {
+  if (!data.Provider_tmdb) return null;
+  const legacyKey = `series:tmdb:${data.Provider_tmdb}`;
+  const entry = sentNotifications.get(legacyKey);
+  return entry?.level === getItemLevel(data.ItemType) ? legacyKey : null;
 }
 
 function getItemLevel(itemType) {
@@ -1044,12 +1045,14 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
       const skipDuplicateCheck = data.ItemId && data.ItemId.startsWith("test-");
       
       if (!skipDuplicateCheck) {
-        if (
-          !isTestNotification &&
-          (sentNotifications.has(itemKey) || hasLegacyItemEntry(data))
-        ) {
+        const matchedKey = isTestNotification
+          ? null
+          : sentNotifications.has(itemKey)
+          ? itemKey
+          : findLegacyItemKey(data);
+        if (matchedKey) {
           logger.info(
-            `[DEDUP] Duplicate ${data.ItemType} notification suppressed for "${data.Name}" (key: ${itemKey})`
+            `[DEDUP] Duplicate ${data.ItemType} notification suppressed for "${data.Name}" (key: ${matchedKey})`
           );
           if (res) {
             return res
@@ -1121,6 +1124,10 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
         logger.info(
           `[BLOCKED] Skipping ${data.ItemType} notification for ${data.Name}: already sent level ${sentLevel} (current level: ${currentLevel})`
         );
+        // Covered by a higher-level post that was actually sent (-1 means still pending).
+        if (sentLevel > 0 && !isTestNotification) {
+          sentNotifications.set(itemKey, { level: currentLevel });
+        }
         if (res) {
           return res
             .status(200)
@@ -1130,8 +1137,6 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
         }
         return;
       }
-
-      if (!isTestNotification) sentNotifications.set(itemKey, { level: currentLevel });
       } // Close the if (!skipDuplicateCheck) block
 
       if (!SeriesId) {
@@ -1148,10 +1153,9 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
           onPendingRequestsChanged,
           isAnimeLibrary
         );
-        if (res)
-          return res
-            .status(200)
-            .send("OK: TV notification sent (no SeriesId).");
+        if (!isTestNotification) sentNotifications.set(itemKey, { level: currentLevel });
+        if (res) res.status(200).send("OK: TV notification sent (no SeriesId).");
+        return;
       }
 
       // Skip debouncing and caching logic for individual test notifications (not batch tests)
@@ -1244,13 +1248,17 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
               logger.info(
                 `[SENT NOTIFICATION] Set sentLevel=${levelSent} for SeriesId ${SeriesId} (${latestData.Name})`
               );
+              for (const [key, level] of debouncedSenders.get(seriesKey)?.itemKeys || []) {
+                sentNotifications.set(key, { level });
+              }
 
               // The debounced function has fired, we can remove it.
               debouncedSenders.delete(seriesKey);
               creatingDebouncers.delete(seriesKey); // Also cleanup from creatingDebouncers
             } catch (error) {
+              const droppedItems = debouncedSenders.get(seriesKey)?.itemKeys.size || 0;
               logger.error(
-                `Error in debounced notification for series ${SeriesId}:`,
+                `Error in debounced notification for series ${SeriesId} (${droppedItems} item(s) not marked as sent, they can be announced again):`,
                 error
               );
               // Cleanup all maps on error so future webhooks for this series are not blocked
@@ -1276,6 +1284,7 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
           seasonCount: 0,
           seasons: [], // Track individual seasons - will be added below
           timestamp: Date.now(), // Track creation time for periodic cleanup
+          itemKeys: new Map(), // itemKey -> level, persisted after a successful send
         });
 
         // Remove from creatingDebouncers now that it's been added to debouncedSenders
@@ -1304,6 +1313,7 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
         if (res) return res.status(500).send("Internal error: debouncer not found");
         return;
       }
+      if (!isTestNotification) debouncer.itemKeys.set(itemKey, currentLevel);
       
       const existingLevel = getItemLevel(debouncer.latestData.ItemType);
 
