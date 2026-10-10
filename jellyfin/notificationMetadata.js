@@ -85,3 +85,16 @@ export async function resolveSeriesProviderIds(
     return null;
   }
 }
+
+/**
+ * Attach parent-series provider IDs to a season/episode payload in place.
+ * Runs at most once per payload: undefined means "not resolved yet", null
+ * means "resolved, nothing found".
+ */
+export async function applySeriesProviderIds(data, options) {
+  if (!data || !isSeriesChild(data.ItemType)) return;
+  if (data.SeriesProvider_tmdb !== undefined) return;
+  const providerIds = await resolveSeriesProviderIds(data, options);
+  data.SeriesProvider_tmdb = providerIds?.Tmdb || null;
+  data.SeriesProvider_imdb = providerIds?.Imdb || null;
+}
