@@ -125,5 +125,5 @@ export async function applySeriesProviderIds(data, options) {
   if (data.SeriesProvider_tmdb !== undefined) return;
   const providerIds = await resolveSeriesProviderIds(data, options);
   data.SeriesProvider_tmdb = providerIds?.Tmdb || null;
-  data.SeriesProvider_imdb = providerIds?.Imdb || null;
+  data.SeriesProvider_imdb = providerIds?.Imdb || data.SeriesProvider_imdb || null;
 }

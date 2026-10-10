@@ -1242,6 +1242,9 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
             // Items arriving while this send is in flight belong to the next trailing call.
             const itemKeysInSend = batch.itemKeys;
             batch.itemKeys = new Map();
+            const seasonsInSend = [...batch.seasons, latestData]
+              .map((item) => item.SeasonNumber ?? (item.ItemType === "Season" ? item.IndexNumber : null))
+              .filter((n) => n != null);
             try {
               logger.info(`[DEBOUNCER] Firing debouncer for SeriesId: ${SeriesId} after ${debounceMs}ms wait. Episodes: ${episodeCount}, Seasons: ${seasonCount}`);
               const isBatchTestNotif = latestData.ItemId && latestData.ItemId.startsWith("batch-");
@@ -1262,13 +1265,9 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
               const levelSent = getItemLevel(latestData.ItemType);
 
               // Overwrites any temporary level=-1 marker.
-              const seasonsSent = [
-                ...batch.seasons.map((season) => season.SeasonNumber),
-                latestData.SeasonNumber,
-              ].filter((n) => n != null);
               sentNotifications.set(
                 burstKey,
-                { level: levelSent, timestamp: Date.now(), seasons: seasonsSent },
+                { level: levelSent, timestamp: Date.now(), seasons: seasonsInSend },
                 SERIES_BURST_WINDOW_MS
               );
               logger.info(
