@@ -1124,8 +1124,13 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
         logger.info(
           `[BLOCKED] Skipping ${data.ItemType} notification for ${data.Name}: already sent level ${sentLevel} (current level: ${currentLevel})`
         );
-        // Covered by a higher-level post that was actually sent (-1 means still pending).
-        if (sentLevel > 0 && !isTestNotification) {
+        // Only mark items the sent post actually covered: a series post covers everything,
+        // a season post only its own seasons' episodes. -1 means nothing was sent yet.
+        const coveredBySentPost =
+          sentLevel === 3 ||
+          (sentLevel === 2 &&
+            sentNotificationData.seasons?.includes(data.SeasonNumber));
+        if (coveredBySentPost && !isTestNotification) {
           sentNotifications.set(itemKey, { level: currentLevel });
         }
         if (res) {
@@ -1212,6 +1217,20 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
           `[DEBOUNCER] Creating debouncer for ${data.ItemType} "${data.Name}" with ${debounceMs}ms timeout (new series: ${isNewSeries}, lower level: ${isLowerLevel}${isBatchTest ? ', batch test' : ''})`
         );
 
+        // The closure holds its own batch: a late trailing call must not touch a newer batch.
+        const batch = {
+          sender: null,
+          latestData: data,
+          episodeCount: 0,
+          episodes: [], // Track individual episodes - will be added below
+          firstEpisode: null,
+          lastEpisode: null,
+          seasonCount: 0,
+          seasons: [], // Track individual seasons - will be added below
+          timestamp: Date.now(), // Track creation time for periodic cleanup
+          itemKeys: new Map(), // itemKey -> level, persisted after a successful send
+        };
+
         const newDebouncedSender = debounce(
           async (
             latestData,
@@ -1220,6 +1239,9 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
             seasonCount = 0,
             seasonDetails = null
           ) => {
+            // Items arriving while this send is in flight belong to the next trailing call.
+            const itemKeysInSend = batch.itemKeys;
+            batch.itemKeys = new Map();
             try {
               logger.info(`[DEBOUNCER] Firing debouncer for SeriesId: ${SeriesId} after ${debounceMs}ms wait. Episodes: ${episodeCount}, Seasons: ${seasonCount}`);
               const isBatchTestNotif = latestData.ItemId && latestData.ItemId.startsWith("batch-");
@@ -1240,29 +1262,33 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
               const levelSent = getItemLevel(latestData.ItemType);
 
               // Overwrites any temporary level=-1 marker.
+              const seasonsSent = [
+                ...batch.seasons.map((season) => season.SeasonNumber),
+                latestData.SeasonNumber,
+              ].filter((n) => n != null);
               sentNotifications.set(
                 burstKey,
-                { level: levelSent, timestamp: Date.now() },
+                { level: levelSent, timestamp: Date.now(), seasons: seasonsSent },
                 SERIES_BURST_WINDOW_MS
               );
               logger.info(
                 `[SENT NOTIFICATION] Set sentLevel=${levelSent} for SeriesId ${SeriesId} (${latestData.Name})`
               );
-              for (const [key, level] of debouncedSenders.get(seriesKey)?.itemKeys || []) {
+              for (const [key, level] of itemKeysInSend) {
                 sentNotifications.set(key, { level });
               }
 
               // The debounced function has fired, we can remove it.
-              debouncedSenders.delete(seriesKey);
+              if (debouncedSenders.get(seriesKey) === batch) debouncedSenders.delete(seriesKey);
               creatingDebouncers.delete(seriesKey); // Also cleanup from creatingDebouncers
             } catch (error) {
-              const droppedItems = debouncedSenders.get(seriesKey)?.itemKeys.size || 0;
+              const droppedItems = itemKeysInSend.size;
               logger.error(
                 `Error in debounced notification for series ${SeriesId} (${droppedItems} item(s) not marked as sent, they can be announced again):`,
                 error
               );
               // Cleanup all maps on error so future webhooks for this series are not blocked
-              debouncedSenders.delete(seriesKey);
+              if (debouncedSenders.get(seriesKey) === batch) debouncedSenders.delete(seriesKey);
               creatingDebouncers.delete(seriesKey);
               // Clear temp marker (-1) so the series is not blocked after a failed notification
               if (sentNotifications.has(burstKey)) {
@@ -1274,18 +1300,8 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
           debounceMs
         );
 
-        debouncedSenders.set(seriesKey, {
-          sender: newDebouncedSender,
-          latestData: data,
-          episodeCount: 0,
-          episodes: [], // Track individual episodes - will be added below
-          firstEpisode: null,
-          lastEpisode: null,
-          seasonCount: 0,
-          seasons: [], // Track individual seasons - will be added below
-          timestamp: Date.now(), // Track creation time for periodic cleanup
-          itemKeys: new Map(), // itemKey -> level, persisted after a successful send
-        });
+        batch.sender = newDebouncedSender;
+        debouncedSenders.set(seriesKey, batch);
 
         // Remove from creatingDebouncers now that it's been added to debouncedSenders
         creatingDebouncers.delete(seriesKey);

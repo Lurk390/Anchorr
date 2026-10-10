@@ -54,7 +54,7 @@ export async function resolveSeriesProviderIds(
 ) {
   if (!data || !isSeriesChild(data.ItemType) || !data.SeriesId) return null;
 
-  if (data.SeriesProvider_tmdb || data.SeriesProvider_imdb) {
+  if (data.SeriesProvider_tmdb) {
     return {
       Tmdb: data.SeriesProvider_tmdb || null,
       Imdb: data.SeriesProvider_imdb || null,
